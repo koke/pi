@@ -16,11 +16,21 @@ import {
 type PayloadCallback = NonNullable<SimpleStreamOptions["onPayload"]>;
 type ResponseCallback = NonNullable<SimpleStreamOptions["onResponse"]>;
 
+export type DraftPrefillReason = "editor_change" | "tool_result" | "context_change" | "model_change" | "tools_change";
+
 interface LlamaPrefillPocLoggerOptions {
 	agentDir: string;
 	model: Model<Api>;
 	context: Context;
 	streamOptions?: SimpleStreamOptions;
+}
+
+interface LlamaPrefillPocDraftChangeOptions {
+	agentDir: string;
+	model: Model<Api>;
+	text: string;
+	reason: DraftPrefillReason;
+	debounceMs: number;
 }
 
 interface LogFields {
@@ -187,12 +197,7 @@ export class LlamaPrefillPocLogger {
 	}
 
 	private log(event: string, fields: LogFields): void {
-		try {
-			mkdirSync(dirname(this.logPath), { recursive: true });
-			appendFileSync(this.logPath, `${formatLogLine(event, fields)}\n`, "utf8");
-		} catch {
-			// Best-effort PoC logging must not affect provider requests.
-		}
+		writeLlamaPrefillPocLog(this.logPath, event, fields);
 	}
 }
 
@@ -201,6 +206,51 @@ export function createLlamaPrefillPocLogger(options: LlamaPrefillPocLoggerOption
 		return undefined;
 	}
 	return new LlamaPrefillPocLogger(options);
+}
+
+export function logLlamaPrefillPocDraftChange(options: LlamaPrefillPocDraftChangeOptions): void {
+	if (options.model.provider !== "llama-cpp") {
+		return;
+	}
+
+	const draftText = options.text.trim();
+	if (!draftText) {
+		return;
+	}
+
+	const key = createHash("sha256")
+		.update(
+			stableStringify({
+				provider: options.model.provider,
+				model: options.model.id,
+				api: options.model.api,
+				reason: options.reason,
+				text: draftText,
+			}),
+		)
+		.digest("hex")
+		.slice(0, 16);
+
+	writeLlamaPrefillPocLog(join(options.agentDir, "llama-prefill-poc.log"), "scheduled", {
+		reason: options.reason,
+		provider: options.model.provider,
+		model: options.model.id,
+		api: options.model.api,
+		key,
+		chars: draftText.length,
+		text_chars: countTextChars(draftText),
+		debounce_ms: options.debounceMs,
+		prefill_active: false,
+	});
+}
+
+function writeLlamaPrefillPocLog(logPath: string, event: string, fields: LogFields): void {
+	try {
+		mkdirSync(dirname(logPath), { recursive: true });
+		appendFileSync(logPath, `${formatLogLine(event, fields)}\n`, "utf8");
+	} catch {
+		// Best-effort PoC logging must not affect provider requests.
+	}
 }
 
 function formatLogLine(event: string, fields: LogFields): string {

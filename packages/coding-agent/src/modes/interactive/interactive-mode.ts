@@ -73,6 +73,7 @@ import type {
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
+import { logLlamaPrefillPocDraftChange } from "../../core/llama-prefill-poc.ts";
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
 import { defaultModelPerProvider, findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
@@ -199,6 +200,7 @@ function hasDefaultModelProvider(providerId: string): providerId is keyof typeof
 }
 
 const BEDROCK_PROVIDER_ID = "amazon-bedrock";
+const LLAMA_DRAFT_CHANGE_DEBOUNCE_MS = 250;
 
 const BUILT_IN_MODEL_PROVIDERS = new Set<string>(getProviders());
 
@@ -294,6 +296,7 @@ export class InteractiveMode {
 
 	// Track if editor is in bash mode (text starts with !)
 	private isBashMode = false;
+	private llamaDraftChangeTimer: ReturnType<typeof setTimeout> | undefined = undefined;
 
 	// Track current bash execution component
 	private bashComponent: BashExecutionComponent | undefined = undefined;
@@ -2431,6 +2434,7 @@ export class InteractiveMode {
 			if (wasBashMode !== this.isBashMode) {
 				this.updateEditorBorderColor();
 			}
+			this.scheduleLlamaDraftChangeLog(text);
 		};
 
 		// Handle clipboard image paste (triggered on Ctrl+V)
@@ -3441,6 +3445,35 @@ export class InteractiveMode {
 			this.editor.borderColor = theme.getThinkingBorderColor(level);
 		}
 		this.ui.requestRender();
+	}
+
+	private clearLlamaDraftChangeTimer(): void {
+		if (this.llamaDraftChangeTimer) {
+			clearTimeout(this.llamaDraftChangeTimer);
+			this.llamaDraftChangeTimer = undefined;
+		}
+	}
+
+	private scheduleLlamaDraftChangeLog(text: string): void {
+		this.clearLlamaDraftChangeTimer();
+		if (!text.trim()) {
+			return;
+		}
+
+		this.llamaDraftChangeTimer = setTimeout(() => {
+			this.llamaDraftChangeTimer = undefined;
+			const model = this.session.model;
+			if (!model) {
+				return;
+			}
+			logLlamaPrefillPocDraftChange({
+				agentDir: this.runtimeHost.services.agentDir,
+				model,
+				text,
+				reason: "editor_change",
+				debounceMs: LLAMA_DRAFT_CHANGE_DEBOUNCE_MS,
+			});
+		}, LLAMA_DRAFT_CHANGE_DEBOUNCE_MS);
 	}
 
 	private cycleThinkingLevel(): void {
@@ -5541,6 +5574,7 @@ export class InteractiveMode {
 
 	stop(): void {
 		this.unregisterSignalHandlers();
+		this.clearLlamaDraftChangeTimer();
 		if (this.settingsManager.getShowTerminalProgress()) {
 			this.ui.terminal.setProgress(false);
 		}
