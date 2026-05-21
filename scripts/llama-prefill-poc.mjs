@@ -37,7 +37,7 @@ Commands:
   restart-server [--model name]   Restart llama-server in left pane
   start-pi                       Start Pi in right pane
   stop-server                    Send Ctrl-C to left pane
-  stop-pi                        Send Ctrl-C to right pane
+  stop-pi                        Send Ctrl-D to right pane
   smoke [expected text]           Send a smoke prompt to Pi
   capture <server|pi> [lines]     Capture recent pane output
   tail-server [lines]             Tail the selected model server log
@@ -289,7 +289,7 @@ function main() {
 		return;
 	}
 	if (command === "stop-pi") {
-		sendKeys(paneTargets(options).pi, ["C-c"]);
+		sendKeys(paneTargets(options).pi, ["C-d"]);
 		return;
 	}
 	if (command === "smoke") {

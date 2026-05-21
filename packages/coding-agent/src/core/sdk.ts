@@ -7,6 +7,7 @@ import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
+import { createLlamaPrefillPocLogger } from "./llama-prefill-poc.ts";
 import { convertToLlm } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel } from "./model-resolver.ts";
@@ -326,13 +327,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		},
 		convertToLlm: convertToLlmWithBlockImages,
 		streamFn: async (model, context, options) => {
+			const llamaPrefillPocLogger = createLlamaPrefillPocLogger({
+				agentDir,
+				model,
+				context,
+				streamOptions: options,
+			});
 			const auth = await modelRegistry.getApiKeyAndHeaders(model);
 			if (!auth.ok) {
 				throw new Error(auth.error);
 			}
 			const providerRetrySettings = settingsManager.getProviderRetrySettings();
 			const attributionHeaders = getAttributionHeaders(model, settingsManager);
-			return streamSimple(model, context, {
+			const stream = streamSimple(model, context, {
 				...options,
 				apiKey: auth.apiKey,
 				timeoutMs: options?.timeoutMs ?? providerRetrySettings.timeoutMs,
@@ -342,7 +349,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					attributionHeaders || auth.headers || options?.headers
 						? { ...attributionHeaders, ...auth.headers, ...options?.headers }
 						: undefined,
+				onPayload: llamaPrefillPocLogger?.wrapOnPayload(options?.onPayload) ?? options?.onPayload,
+				onResponse: llamaPrefillPocLogger?.wrapOnResponse(options?.onResponse) ?? options?.onResponse,
 			});
+			return llamaPrefillPocLogger?.wrapStream(stream) ?? stream;
 		},
 		onPayload: async (payload, _model) => {
 			const runner = extensionRunnerRef.current;
