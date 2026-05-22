@@ -14,9 +14,12 @@ case "$MODEL_PRESET" in
 	qwen27b)
 		CONTEXT_WINDOW="${PI_LLAMA_PREFILL_CONTEXT_WINDOW:-32768}"
 		;;
+	qwen35a3b)
+		CONTEXT_WINDOW="${PI_LLAMA_PREFILL_CONTEXT_WINDOW:-32768}"
+		;;
 	*)
 		echo "Unknown PI_LLAMA_PREFILL_MODEL: $MODEL_PRESET" >&2
-		echo "Expected: gemma or qwen27b" >&2
+		echo "Expected: gemma, qwen27b, or qwen35a3b" >&2
 		exit 1
 		;;
 esac
