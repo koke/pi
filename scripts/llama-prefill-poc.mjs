@@ -61,8 +61,8 @@ function usage() {
 Commands:
   status                         Show pi-poc panes
   setup                          Ensure two panes and isolated models.json
-  restart-server [--model name]   Restart llama-server in left pane
-  start-pi                       Start Pi in right pane
+  restart-server [--model name]   Restart llama-server in top pane
+  start-pi                       Start Pi in bottom pane
   stop-server                    Send Ctrl-C to left pane
   stop-pi                        Send Ctrl-D to right pane
   smoke [expected text]           Send a smoke prompt to Pi
@@ -147,7 +147,7 @@ function ensureLayout(options) {
 	const output = tmuxOutput(["list-panes", "-t", window, "-F", "#{pane_index}"]).trim();
 	const panes = output ? output.split("\n") : [];
 	if (panes.length === 1) {
-		tmux(["split-window", "-h", "-t", `${window}.0`, "-c", defaults.cwd]);
+		tmux(["split-window", "-v", "-t", `${window}.0`, "-c", defaults.cwd]);
 	}
 }
 

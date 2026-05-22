@@ -28,6 +28,8 @@ export type LlamaPrefillPocPayloadReason =
 	| "model_change"
 	| "tools_change";
 
+export type LlamaPrefillPocWarmupLane = "base" | "draft";
+
 interface LlamaPrefillPocLoggerOptions {
 	agentDir: string;
 	model: Model<Api>;
@@ -48,6 +50,7 @@ interface LlamaPrefillPocPayloadOptions {
 	model: Model<Api>;
 	context: Context;
 	reason: LlamaPrefillPocPayloadReason;
+	lane?: LlamaPrefillPocWarmupLane;
 	streamOptions?: SimpleStreamOptions;
 	debounceMs?: number;
 	chunkChars?: number;
@@ -285,6 +288,7 @@ export async function logLlamaPrefillPocPayload(options: LlamaPrefillPocPayloadO
 			provider: options.model.provider,
 			model: options.model.id,
 			api: options.model.api,
+			lane: options.lane,
 			skipped: true,
 			skip_reason: "unsupported_api",
 			network_sent: false,
@@ -304,6 +308,7 @@ export async function logLlamaPrefillPocPayload(options: LlamaPrefillPocPayloadO
 			provider: options.model.provider,
 			model: options.model.id,
 			api: options.model.api,
+			lane: options.lane,
 			key: hashPayload(options.model, finalPayload),
 			prompt_key: hashPayload(options.model, promptPayload),
 			payload_chars: stableStringifyLength(finalPayload),
@@ -329,6 +334,7 @@ export async function logLlamaPrefillPocPayload(options: LlamaPrefillPocPayloadO
 			provider: options.model.provider,
 			model: options.model.id,
 			api: options.model.api,
+			lane: options.lane,
 			error: error instanceof Error ? error.message : String(error),
 			prefill_active: false,
 			network_sent: false,
@@ -348,6 +354,7 @@ export async function sendLlamaPrefillPocWarmup(options: LlamaPrefillPocWarmupOp
 			provider: options.model.provider,
 			model: options.model.id,
 			api: options.model.api,
+			lane: options.lane,
 			skipped: true,
 			skip_reason: "unsupported_api",
 			network_sent: false,
@@ -361,6 +368,7 @@ export async function sendLlamaPrefillPocWarmup(options: LlamaPrefillPocWarmupOp
 			provider: options.model.provider,
 			model: options.model.id,
 			api: options.model.api,
+			lane: options.lane,
 			skipped: true,
 			skip_reason: "missing_api_key",
 			error: options.authError,
@@ -394,6 +402,7 @@ export async function sendLlamaPrefillPocWarmup(options: LlamaPrefillPocWarmupOp
 			provider: options.model.provider,
 			model: options.model.id,
 			api: options.model.api,
+			lane: options.lane,
 			key,
 			prompt_key: promptKey,
 			warmup_key: warmupKey,
@@ -423,6 +432,7 @@ export async function sendLlamaPrefillPocWarmup(options: LlamaPrefillPocWarmupOp
 			writeLlamaPrefillPocLog(logPath, "warmup_aborted", {
 				warmup_id: warmupId,
 				reason: options.reason,
+				lane: options.lane,
 				key,
 				prompt_key: promptKey,
 				warmup_key: warmupKey,
@@ -438,6 +448,7 @@ export async function sendLlamaPrefillPocWarmup(options: LlamaPrefillPocWarmupOp
 		writeLlamaPrefillPocLog(logPath, "warmup_start", {
 			warmup_id: warmupId,
 			reason: options.reason,
+			lane: options.lane,
 			key,
 			prompt_key: promptKey,
 			warmup_key: warmupKey,
@@ -458,6 +469,7 @@ export async function sendLlamaPrefillPocWarmup(options: LlamaPrefillPocWarmupOp
 		writeLlamaPrefillPocLog(logPath, event, {
 			warmup_id: warmupId,
 			reason: options.reason,
+			lane: options.lane,
 			key,
 			prompt_key: promptKey,
 			warmup_key: warmupKey,
@@ -476,6 +488,7 @@ export async function sendLlamaPrefillPocWarmup(options: LlamaPrefillPocWarmupOp
 				provider: options.model.provider,
 				model: options.model.id,
 				api: options.model.api,
+				lane: options.lane,
 				key,
 				prompt_key: promptKey,
 				warmup_key: warmupKey,
@@ -492,6 +505,7 @@ export async function sendLlamaPrefillPocWarmup(options: LlamaPrefillPocWarmupOp
 			provider: options.model.provider,
 			model: options.model.id,
 			api: options.model.api,
+			lane: options.lane,
 			key,
 			prompt_key: promptKey,
 			warmup_key: warmupKey,

@@ -88,7 +88,11 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
-import { type LlamaPrefillPocPayloadReason, sendLlamaPrefillPocWarmup } from "./llama-prefill-poc.ts";
+import {
+	type LlamaPrefillPocPayloadReason,
+	type LlamaPrefillPocWarmupLane,
+	sendLlamaPrefillPocWarmup,
+} from "./llama-prefill-poc.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -332,8 +336,10 @@ export class AgentSession {
 	// Base system prompt (without extension appends) - used to apply fresh appends each turn
 	private _baseSystemPrompt = "";
 	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
-	private _llamaPrefillPocWarmupAbortController: AbortController | undefined = undefined;
-	private _llamaPrefillPocWarmupSequence = 0;
+	private _llamaPrefillPocBaseWarmupAbortController: AbortController | undefined = undefined;
+	private _llamaPrefillPocDraftWarmupAbortController: AbortController | undefined = undefined;
+	private _llamaPrefillPocBaseWarmupSequence = 0;
+	private _llamaPrefillPocDraftWarmupSequence = 0;
 	private _llamaPrefillPocLaunchWarmupsEnabled = false;
 	private _llamaPrefillPocToolStreamChars = new Map<string, number>();
 	private _llamaPrefillPocToolStreamAt = new Map<string, number>();
@@ -612,13 +618,60 @@ export class AgentSession {
 		};
 	}
 
-	private _cancelLlamaPrefillPocWarmup(reason: string): void {
-		this._llamaPrefillPocWarmupAbortController?.abort(reason);
-		this._llamaPrefillPocWarmupAbortController = undefined;
+	private _getLlamaPrefillPocWarmupLane(reason: LlamaPrefillPocPayloadReason): LlamaPrefillPocWarmupLane {
+		if (
+			reason === "launch" ||
+			reason === "context_change" ||
+			reason === "model_change" ||
+			reason === "tools_change"
+		) {
+			return "base";
+		}
+		return "draft";
+	}
+
+	private _cancelLlamaPrefillPocWarmupLane(lane: LlamaPrefillPocWarmupLane, reason: string): void {
+		if (lane === "base") {
+			this._llamaPrefillPocBaseWarmupAbortController?.abort(reason);
+			this._clearLlamaPrefillPocWarmupLane(lane);
+			return;
+		}
+		this._llamaPrefillPocDraftWarmupAbortController?.abort(reason);
+		this._clearLlamaPrefillPocWarmupLane(lane);
+	}
+
+	private _clearLlamaPrefillPocWarmupLane(lane: LlamaPrefillPocWarmupLane): void {
+		if (lane === "base") {
+			this._llamaPrefillPocBaseWarmupAbortController = undefined;
+			return;
+		}
+		this._llamaPrefillPocDraftWarmupAbortController = undefined;
+	}
+
+	private _cancelAllLlamaPrefillPocWarmups(reason: string): void {
+		this._cancelLlamaPrefillPocWarmupLane("base", reason);
+		this._cancelLlamaPrefillPocWarmupLane("draft", reason);
 	}
 
 	cancelLlamaPrefillPocWarmup(reason: string): void {
-		this._cancelLlamaPrefillPocWarmup(reason);
+		this._cancelLlamaPrefillPocWarmupLane("draft", reason);
+	}
+
+	private _startLlamaPrefillPocWarmupLane(lane: LlamaPrefillPocWarmupLane, abortController: AbortController): number {
+		if (lane === "base") {
+			this._llamaPrefillPocBaseWarmupAbortController = abortController;
+			this._llamaPrefillPocBaseWarmupSequence++;
+			return this._llamaPrefillPocBaseWarmupSequence;
+		}
+		this._llamaPrefillPocDraftWarmupAbortController = abortController;
+		this._llamaPrefillPocDraftWarmupSequence++;
+		return this._llamaPrefillPocDraftWarmupSequence;
+	}
+
+	private _isCurrentLlamaPrefillPocWarmup(lane: LlamaPrefillPocWarmupLane, sequence: number): boolean {
+		return lane === "base"
+			? this._llamaPrefillPocBaseWarmupSequence === sequence
+			: this._llamaPrefillPocDraftWarmupSequence === sequence;
 	}
 
 	private async _sendLlamaPrefillPocWarmup(
@@ -635,10 +688,10 @@ export class AgentSession {
 		if (!model) {
 			return;
 		}
-		this._cancelLlamaPrefillPocWarmup("superseded");
+		const lane = this._getLlamaPrefillPocWarmupLane(reason);
+		this._cancelLlamaPrefillPocWarmupLane(lane, "superseded");
 		const abortController = new AbortController();
-		const sequence = ++this._llamaPrefillPocWarmupSequence;
-		this._llamaPrefillPocWarmupAbortController = abortController;
+		const sequence = this._startLlamaPrefillPocWarmupLane(lane, abortController);
 		try {
 			const context = await this._buildLlamaPrefillPocContext(messages);
 			const auth = await this._modelRegistry.getApiKeyAndHeaders(model);
@@ -647,6 +700,7 @@ export class AgentSession {
 				model,
 				context,
 				reason,
+				lane,
 				streamOptions: this._getLlamaPrefillPocStreamOptions(),
 				apiKey: auth.ok ? auth.apiKey : undefined,
 				authError: auth.ok ? undefined : auth.error,
@@ -657,8 +711,8 @@ export class AgentSession {
 		} catch {
 			// Best-effort PoC diagnostics must not affect agent event processing.
 		} finally {
-			if (this._llamaPrefillPocWarmupSequence === sequence) {
-				this._llamaPrefillPocWarmupAbortController = undefined;
+			if (this._isCurrentLlamaPrefillPocWarmup(lane, sequence)) {
+				this._clearLlamaPrefillPocWarmupLane(lane);
 			}
 		}
 	}
@@ -735,7 +789,7 @@ export class AgentSession {
 	logLlamaPrefillPocEditorDraft(text: string, debounceMs: number): void {
 		const draftText = text.trim();
 		if (!draftText) {
-			this._cancelLlamaPrefillPocWarmup("empty_editor");
+			this._cancelLlamaPrefillPocWarmupLane("draft", "empty_editor");
 			return;
 		}
 		const draftMessage: AgentMessage = {
@@ -901,7 +955,7 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
-		this._cancelLlamaPrefillPocWarmup("dispose");
+		this._cancelAllLlamaPrefillPocWarmups("dispose");
 		this._extensionRunner.invalidate(
 			"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
 		);
@@ -1204,7 +1258,7 @@ export class AgentSession {
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
 					);
 				}
-				this._cancelLlamaPrefillPocWarmup("submit_queued");
+				this._cancelLlamaPrefillPocWarmupLane("draft", "submit_queued");
 				if (options.streamingBehavior === "followUp") {
 					await this._queueFollowUp(expandedText, currentImages);
 				} else {
@@ -1304,7 +1358,7 @@ export class AgentSession {
 		}
 
 		preflightResult?.(true);
-		this._cancelLlamaPrefillPocWarmup("submit");
+		this._cancelLlamaPrefillPocWarmupLane("draft", "submit");
 		await this._runAgentPrompt(messages);
 	}
 
@@ -1583,7 +1637,7 @@ export class AgentSession {
 	 * Abort current operation and wait for agent to become idle.
 	 */
 	async abort(): Promise<void> {
-		this._cancelLlamaPrefillPocWarmup("abort");
+		this._cancelAllLlamaPrefillPocWarmups("abort");
 		this.abortRetry();
 		this.agent.abort();
 		await this.agent.waitForIdle();
@@ -2600,7 +2654,7 @@ export class AgentSession {
 	}
 
 	async reload(): Promise<void> {
-		this._cancelLlamaPrefillPocWarmup("reload");
+		this._cancelAllLlamaPrefillPocWarmups("reload");
 		const previousFlagValues = this._extensionRunner.getFlagValues();
 		await emitSessionShutdownEvent(this._extensionRunner, { type: "session_shutdown", reason: "reload" });
 		await this.settingsManager.reload();
