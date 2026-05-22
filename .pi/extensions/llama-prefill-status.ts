@@ -8,6 +8,7 @@ const STATUS_KEY = "llama-prefill";
 const DEFAULT_AGENT_DIR = "/private/tmp/pi-dev/agent";
 const POLL_MS = 500;
 const MAX_TAIL_BYTES = 64 * 1024;
+const SOURCE_PID = String(process.pid);
 
 function logPath(): string {
 	return join(process.env.PI_CODING_AGENT_DIR ?? DEFAULT_AGENT_DIR, "llama-prefill-poc.log");
@@ -60,7 +61,7 @@ function latestWarmupEvent(path: string): LogFields | undefined {
 	const lines = readTail(path).split("\n");
 	for (let index = lines.length - 1; index >= 0; index -= 1) {
 		const fields = parseFields(lines[index].trim());
-		if (fields?.event?.startsWith("warmup_")) {
+		if (fields?.event?.startsWith("warmup_") && fields.source_pid === SOURCE_PID) {
 			return fields;
 		}
 	}

@@ -381,7 +381,7 @@ export async function sendLlamaPrefillPocWarmup(options: LlamaPrefillPocWarmupOp
 		const beforeCallbackAt = Date.now();
 		const nextPayload = await options.streamOptions?.onPayload?.(payload, options.model);
 		const finalPayload = nextPayload === undefined ? payload : nextPayload;
-		const warmupPayload = buildWarmupPayload(finalPayload);
+		const warmupPayload = buildWarmupPayload(finalPayload, options.reason, warmupId);
 		const promptPayload = getPromptComparablePayload(finalPayload);
 		const now = Date.now();
 		key = hashPayload(options.model, finalPayload);
@@ -413,6 +413,7 @@ export async function sendLlamaPrefillPocWarmup(options: LlamaPrefillPocWarmupOp
 			chunk_chars: options.chunkChars,
 			tool_name: options.toolName,
 			tool_call_id: options.toolCallId,
+			launch_nonce: options.reason === "launch" ? true : undefined,
 			payload_callback_ms: now - beforeCallbackAt,
 			prefill_active: true,
 			network_sent: true,
@@ -512,7 +513,7 @@ function writeLlamaPrefillPocLog(logPath: string, event: string, fields: LogFiel
 }
 
 function formatLogLine(event: string, fields: LogFields): string {
-	const parts = ["llama_prefill", `event=${event}`];
+	const parts = ["llama_prefill", `event=${event}`, `source_pid=${process.pid}`];
 	for (const [key, value] of Object.entries(fields)) {
 		if (value === undefined) {
 			continue;
@@ -563,11 +564,14 @@ function getPromptComparablePayload(payload: unknown): unknown {
 	};
 }
 
-function buildWarmupPayload(payload: unknown): unknown {
+function buildWarmupPayload(payload: unknown, reason: LlamaPrefillPocPayloadReason, warmupId: string): unknown {
 	if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
 		return payload;
 	}
 	const record = { ...(payload as Record<string, unknown>) };
+	if (reason === "launch") {
+		record.messages = addLaunchWarmupNonce(record.messages, warmupId);
+	}
 	record.stream = false;
 	record.cache_prompt = true;
 	if (hasOwn(record, "max_completion_tokens") && !hasOwn(record, "max_tokens")) {
@@ -576,6 +580,19 @@ function buildWarmupPayload(payload: unknown): unknown {
 		record.max_tokens = 1;
 	}
 	return record;
+}
+
+function addLaunchWarmupNonce(messages: unknown, warmupId: string): unknown {
+	if (!Array.isArray(messages)) {
+		return messages;
+	}
+	return [
+		...messages,
+		{
+			role: "user",
+			content: `Pi draft prefill launch nonce ${warmupId}`,
+		},
+	];
 }
 
 function hasOwn(record: Record<string, unknown>, key: string): boolean {
