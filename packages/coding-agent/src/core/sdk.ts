@@ -403,6 +403,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		agent,
 		sessionManager,
 		settingsManager,
+		agentDir,
 		cwd,
 		scopedModels: options.scopedModels,
 		resourceLoader,

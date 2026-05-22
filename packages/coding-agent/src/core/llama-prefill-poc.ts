@@ -6,6 +6,7 @@ import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
 	type AssistantMessageEventStream,
+	buildOpenAICompletionsPayload,
 	type Context,
 	createAssistantMessageEventStream,
 	type Model,
@@ -17,6 +18,8 @@ type PayloadCallback = NonNullable<SimpleStreamOptions["onPayload"]>;
 type ResponseCallback = NonNullable<SimpleStreamOptions["onResponse"]>;
 
 export type DraftPrefillReason = "editor_change" | "tool_result" | "context_change" | "model_change" | "tools_change";
+
+export type LlamaPrefillPocPayloadReason = "launch" | "tool_result_stream" | "tool_result" | "editor_change";
 
 interface LlamaPrefillPocLoggerOptions {
 	agentDir: string;
@@ -31,6 +34,18 @@ interface LlamaPrefillPocDraftChangeOptions {
 	text: string;
 	reason: DraftPrefillReason;
 	debounceMs: number;
+}
+
+interface LlamaPrefillPocPayloadOptions {
+	agentDir: string;
+	model: Model<Api>;
+	context: Context;
+	reason: LlamaPrefillPocPayloadReason;
+	streamOptions?: SimpleStreamOptions;
+	debounceMs?: number;
+	chunkChars?: number;
+	toolName?: string;
+	toolCallId?: string;
 }
 
 interface LogFields {
@@ -244,6 +259,69 @@ export function logLlamaPrefillPocDraftChange(options: LlamaPrefillPocDraftChang
 	});
 }
 
+export async function logLlamaPrefillPocPayload(options: LlamaPrefillPocPayloadOptions): Promise<void> {
+	if (options.model.provider !== "llama-cpp") {
+		return;
+	}
+
+	const logPath = join(options.agentDir, "llama-prefill-poc.log");
+	if (!isOpenAICompletionsModel(options.model)) {
+		writeLlamaPrefillPocLog(logPath, "warmup_payload_skipped", {
+			reason: options.reason,
+			provider: options.model.provider,
+			model: options.model.id,
+			api: options.model.api,
+			skipped: true,
+			skip_reason: "unsupported_api",
+			network_sent: false,
+		});
+		return;
+	}
+
+	try {
+		const payload = buildOpenAICompletionsPayload(options.model, options.context, options.streamOptions);
+		const beforeCallbackAt = Date.now();
+		const nextPayload = await options.streamOptions?.onPayload?.(payload, options.model);
+		const finalPayload = nextPayload === undefined ? payload : nextPayload;
+		const promptPayload = getPromptComparablePayload(finalPayload);
+		const now = Date.now();
+		writeLlamaPrefillPocLog(logPath, "warmup_payload", {
+			reason: options.reason,
+			provider: options.model.provider,
+			model: options.model.id,
+			api: options.model.api,
+			key: hashPayload(options.model, finalPayload),
+			prompt_key: hashPayload(options.model, promptPayload),
+			payload_chars: stableStringifyLength(finalPayload),
+			payload_text_chars: countTextChars(finalPayload),
+			prompt_chars: stableStringifyLength(promptPayload),
+			prompt_text_chars: countTextChars(promptPayload),
+			context_chars: stableStringifyLength(options.context),
+			context_text_chars: countTextChars(options.context),
+			messages: options.context.messages.length,
+			tools: options.context.tools?.length ?? 0,
+			max_tokens: getPayloadMaxTokens(finalPayload),
+			debounce_ms: options.debounceMs,
+			chunk_chars: options.chunkChars,
+			tool_name: options.toolName,
+			tool_call_id: options.toolCallId,
+			payload_callback_ms: now - beforeCallbackAt,
+			prefill_active: false,
+			network_sent: false,
+		});
+	} catch (error) {
+		writeLlamaPrefillPocLog(logPath, "warmup_payload_error", {
+			reason: options.reason,
+			provider: options.model.provider,
+			model: options.model.id,
+			api: options.model.api,
+			error: error instanceof Error ? error.message : String(error),
+			prefill_active: false,
+			network_sent: false,
+		});
+	}
+}
+
 function writeLlamaPrefillPocLog(logPath: string, event: string, fields: LogFields): void {
 	try {
 		mkdirSync(dirname(logPath), { recursive: true });
@@ -286,6 +364,27 @@ function hashPayload(model: Model<Api>, payload: unknown): string {
 		)
 		.digest("hex")
 		.slice(0, 16);
+}
+
+function getPromptComparablePayload(payload: unknown): unknown {
+	if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+		return payload;
+	}
+	const record = payload as Record<string, unknown>;
+	return {
+		chat_template_kwargs: record.chat_template_kwargs,
+		enable_thinking: record.enable_thinking,
+		messages: record.messages,
+		model: record.model,
+		reasoning_effort: record.reasoning_effort,
+		thinking: record.thinking,
+		tool_choice: record.tool_choice,
+		tools: record.tools,
+	};
+}
+
+function isOpenAICompletionsModel(model: Model<Api>): model is Model<"openai-completions"> {
+	return model.api === "openai-completions";
 }
 
 function stableStringifyLength(value: unknown): number {

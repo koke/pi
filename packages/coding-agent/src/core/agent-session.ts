@@ -21,9 +21,19 @@ import type {
 	AgentMessage,
 	AgentState,
 	AgentTool,
+	AgentToolResult,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@earendil-works/pi-ai";
+import type {
+	AssistantMessage,
+	Context,
+	ImageContent,
+	Message,
+	Model,
+	SimpleStreamOptions,
+	TextContent,
+	ToolResultMessage,
+} from "@earendil-works/pi-ai";
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
@@ -33,6 +43,7 @@ import {
 	resetApiProviders,
 	streamSimple,
 } from "@earendil-works/pi-ai";
+import { getAgentDir } from "../config.ts";
 import { theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { sleep } from "../utils/sleep.ts";
@@ -77,6 +88,7 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { type LlamaPrefillPocPayloadReason, logLlamaPrefillPocPayload } from "./llama-prefill-poc.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -156,6 +168,8 @@ export interface AgentSessionConfig {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settingsManager: SettingsManager;
+	/** Global config directory used for PoC diagnostics. Default: getAgentDir(). */
+	agentDir?: string;
 	cwd: string;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
@@ -288,6 +302,7 @@ export class AgentSession {
 
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
+	private _agentDir: string;
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private _cwd: string;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
@@ -322,6 +337,7 @@ export class AgentSession {
 		this._scopedModels = config.scopedModels ?? [];
 		this._resourceLoader = config.resourceLoader;
 		this._customTools = config.customTools ?? [];
+		this._agentDir = config.agentDir ?? getAgentDir();
 		this._cwd = config.cwd;
 		this._modelRegistry = config.modelRegistry;
 		this._extensionRunnerRef = config.extensionRunnerRef;
@@ -493,6 +509,7 @@ export class AgentSession {
 
 		// Notify all listeners
 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
+		this._logLlamaPrefillPocEventPayload(event);
 
 		// Handle session persistence
 		if (event.type === "message_end") {
@@ -560,6 +577,112 @@ export class AgentSession {
 		if (typeof content === "string") return content;
 		const textBlocks = content.filter((c) => c.type === "text");
 		return textBlocks.map((c) => (c as TextContent).text).join("");
+	}
+
+	private _getLlamaPrefillPocStreamOptions(): SimpleStreamOptions {
+		const reasoning: SimpleStreamOptions["reasoning"] =
+			this.agent.state.thinkingLevel === "off" ? undefined : this.agent.state.thinkingLevel;
+		return {
+			reasoning,
+			sessionId: this.agent.sessionId,
+			onPayload: this.agent.onPayload,
+			transport: this.agent.transport,
+			thinkingBudgets: this.agent.thinkingBudgets,
+			maxRetryDelayMs: this.agent.maxRetryDelayMs,
+		};
+	}
+
+	private async _buildLlamaPrefillPocContext(messages: AgentMessage[]): Promise<Context> {
+		const transformedMessages = this.agent.transformContext
+			? await this.agent.transformContext(messages, this.agent.signal)
+			: messages;
+		const llmMessages = await this.agent.convertToLlm(transformedMessages);
+		return {
+			systemPrompt: this.agent.state.systemPrompt,
+			messages: llmMessages,
+			tools: this.agent.state.tools,
+		};
+	}
+
+	private async _logLlamaPrefillPocPayload(
+		reason: LlamaPrefillPocPayloadReason,
+		messages: AgentMessage[],
+		metadata: {
+			debounceMs?: number;
+			chunkChars?: number;
+			toolName?: string;
+			toolCallId?: string;
+		} = {},
+	): Promise<void> {
+		const model = this.model;
+		if (!model) {
+			return;
+		}
+		try {
+			const context = await this._buildLlamaPrefillPocContext(messages);
+			await logLlamaPrefillPocPayload({
+				agentDir: this._agentDir,
+				model,
+				context,
+				reason,
+				streamOptions: this._getLlamaPrefillPocStreamOptions(),
+				...metadata,
+			});
+		} catch {
+			// Best-effort PoC diagnostics must not affect agent event processing.
+		}
+	}
+
+	private _logLlamaPrefillPocEventPayload(event: AgentEvent): void {
+		if (event.type === "tool_execution_update") {
+			const partialResult = asAgentToolResult(event.partialResult);
+			if (!partialResult || partialResult.content.length === 0) {
+				return;
+			}
+			const toolResultMessage: ToolResultMessage = {
+				role: "toolResult",
+				toolCallId: event.toolCallId,
+				toolName: event.toolName,
+				content: partialResult.content,
+				details: partialResult.details,
+				isError: false,
+				timestamp: Date.now(),
+			};
+			void this._logLlamaPrefillPocPayload("tool_result_stream", [...this.agent.state.messages, toolResultMessage], {
+				chunkChars: countTextContentChars(partialResult.content),
+				toolName: event.toolName,
+				toolCallId: event.toolCallId,
+			});
+			return;
+		}
+
+		if (event.type === "message_end" && event.message.role === "toolResult") {
+			void this._logLlamaPrefillPocPayload("tool_result", this.agent.state.messages, {
+				chunkChars: countTextContentChars(event.message.content),
+				toolName: event.message.toolName,
+				toolCallId: event.message.toolCallId,
+			});
+		}
+	}
+
+	logLlamaPrefillPocEditorDraft(text: string, debounceMs: number): void {
+		const draftText = text.trim();
+		if (!draftText) {
+			return;
+		}
+		const draftMessage: AgentMessage = {
+			role: "user",
+			content: [{ type: "text", text: draftText }],
+			timestamp: Date.now(),
+		};
+		void this._logLlamaPrefillPocPayload("editor_change", [...this.agent.state.messages, draftMessage], {
+			debounceMs,
+			chunkChars: draftText.length,
+		});
+	}
+
+	private _logLlamaPrefillPocLaunchPayload(): void {
+		void this._logLlamaPrefillPocPayload("launch", this.agent.state.messages);
 	}
 
 	/** Find the last assistant message in agent state (including aborted ones) */
@@ -2057,6 +2180,7 @@ export class AgentSession {
 		this._applyExtensionBindings(this._extensionRunner);
 		await this._extensionRunner.emit(this._sessionStartEvent);
 		await this.extendResourcesFromExtensions(this._sessionStartEvent.reason === "reload" ? "reload" : "startup");
+		this._logLlamaPrefillPocLaunchPayload();
 	}
 
 	private async extendResourcesFromExtensions(reason: "startup" | "reload"): Promise<void> {
@@ -3082,4 +3206,44 @@ export class AgentSession {
 	get extensionRunner(): ExtensionRunner {
 		return this._extensionRunner;
 	}
+}
+
+function asAgentToolResult(value: unknown): AgentToolResult<unknown> | undefined {
+	if (value === null || typeof value !== "object") {
+		return undefined;
+	}
+	const record = value as Record<string, unknown>;
+	if (!isToolResultContent(record.content)) {
+		return undefined;
+	}
+	return {
+		content: record.content,
+		details: record.details,
+		terminate: typeof record.terminate === "boolean" ? record.terminate : undefined,
+	};
+}
+
+function isToolResultContent(value: unknown): value is (TextContent | ImageContent)[] {
+	if (!Array.isArray(value)) {
+		return false;
+	}
+	return value.every(isToolResultContentBlock);
+}
+
+function isToolResultContentBlock(value: unknown): value is TextContent | ImageContent {
+	if (value === null || typeof value !== "object") {
+		return false;
+	}
+	const record = value as Record<string, unknown>;
+	if (record.type === "text") {
+		return typeof record.text === "string";
+	}
+	if (record.type === "image") {
+		return typeof record.data === "string" && typeof record.mimeType === "string";
+	}
+	return false;
+}
+
+function countTextContentChars(content: (TextContent | ImageContent)[]): number {
+	return content.reduce((sum, block) => (block.type === "text" ? sum + block.text.length : sum), 0);
 }

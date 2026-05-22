@@ -73,7 +73,6 @@ import type {
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
-import { logLlamaPrefillPocDraftChange } from "../../core/llama-prefill-poc.ts";
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
 import { defaultModelPerProvider, findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
@@ -3462,17 +3461,7 @@ export class InteractiveMode {
 
 		this.llamaDraftChangeTimer = setTimeout(() => {
 			this.llamaDraftChangeTimer = undefined;
-			const model = this.session.model;
-			if (!model) {
-				return;
-			}
-			logLlamaPrefillPocDraftChange({
-				agentDir: this.runtimeHost.services.agentDir,
-				model,
-				text,
-				reason: "editor_change",
-				debounceMs: LLAMA_DRAFT_CHANGE_DEBOUNCE_MS,
-			});
+			this.session.logLlamaPrefillPocEditorDraft(text, LLAMA_DRAFT_CHANGE_DEBOUNCE_MS);
 		}, LLAMA_DRAFT_CHANGE_DEBOUNCE_MS);
 	}
 

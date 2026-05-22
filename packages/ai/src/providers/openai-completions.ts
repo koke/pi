@@ -80,6 +80,10 @@ export interface OpenAICompletionsOptions extends StreamOptions {
 	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
 }
 
+export type OpenAICompletionsPayload = OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
+
+export type OpenAICompletionsPayloadOptions = OpenAICompletionsOptions & Pick<SimpleStreamOptions, "reasoning">;
+
 interface OpenAICompatCacheControl {
 	type: "ephemeral";
 	ttl?: string;
@@ -444,6 +448,22 @@ export const streamSimpleOpenAICompletions: StreamFunction<"openai-completions",
 		toolChoice,
 	} satisfies OpenAICompletionsOptions);
 };
+
+export function buildOpenAICompletionsPayload(
+	model: Model<"openai-completions">,
+	context: Context,
+	options?: OpenAICompletionsPayloadOptions,
+): OpenAICompletionsPayload {
+	let normalizedOptions: OpenAICompletionsOptions | undefined = options;
+	if (options?.reasoning !== undefined && options.reasoningEffort === undefined) {
+		const clampedReasoning = clampThinkingLevel(model, options.reasoning);
+		normalizedOptions = {
+			...options,
+			reasoningEffort: clampedReasoning === "off" ? undefined : clampedReasoning,
+		};
+	}
+	return buildParams(model, context, normalizedOptions);
+}
 
 function createClient(
 	model: Model<"openai-completions">,

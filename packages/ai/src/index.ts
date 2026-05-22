@@ -20,7 +20,12 @@ export type {
 	OpenAICodexResponsesOptions,
 	OpenAICodexWebSocketDebugStats,
 } from "./providers/openai-codex-responses.ts";
-export type { OpenAICompletionsOptions } from "./providers/openai-completions.ts";
+export {
+	buildOpenAICompletionsPayload,
+	type OpenAICompletionsOptions,
+	type OpenAICompletionsPayload,
+	type OpenAICompletionsPayloadOptions,
+} from "./providers/openai-completions.ts";
 export type { OpenAIResponsesOptions } from "./providers/openai-responses.ts";
 export * from "./providers/register-builtins.ts";
 export * from "./session-resources.ts";
