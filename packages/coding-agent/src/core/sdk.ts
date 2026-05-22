@@ -317,6 +317,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	};
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
+	let cancelLlamaPrefillPocWarmup: ((reason: string) => void) | undefined;
 
 	agent = new Agent({
 		initialState: {
@@ -327,6 +328,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		},
 		convertToLlm: convertToLlmWithBlockImages,
 		streamFn: async (model, context, options) => {
+			cancelLlamaPrefillPocWarmup?.("provider_request");
 			const llamaPrefillPocLogger = createLlamaPrefillPocLogger({
 				agentDir,
 				model,
@@ -414,6 +416,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
 	});
+	cancelLlamaPrefillPocWarmup = (reason) => session.cancelLlamaPrefillPocWarmup(reason);
 	const extensionsResult = resourceLoader.getExtensions();
 
 	return {

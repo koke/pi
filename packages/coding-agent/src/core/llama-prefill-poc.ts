@@ -19,7 +19,14 @@ type ResponseCallback = NonNullable<SimpleStreamOptions["onResponse"]>;
 
 export type DraftPrefillReason = "editor_change" | "tool_result" | "context_change" | "model_change" | "tools_change";
 
-export type LlamaPrefillPocPayloadReason = "launch" | "tool_result_stream" | "tool_result" | "editor_change";
+export type LlamaPrefillPocPayloadReason =
+	| "launch"
+	| "tool_result_stream"
+	| "tool_result"
+	| "editor_change"
+	| "context_change"
+	| "model_change"
+	| "tools_change";
 
 interface LlamaPrefillPocLoggerOptions {
 	agentDir: string;
@@ -46,6 +53,13 @@ interface LlamaPrefillPocPayloadOptions {
 	chunkChars?: number;
 	toolName?: string;
 	toolCallId?: string;
+}
+
+interface LlamaPrefillPocWarmupOptions extends LlamaPrefillPocPayloadOptions {
+	apiKey?: string;
+	authError?: string;
+	headers?: Record<string, string>;
+	signal: AbortSignal;
 }
 
 interface LogFields {
@@ -322,6 +336,172 @@ export async function logLlamaPrefillPocPayload(options: LlamaPrefillPocPayloadO
 	}
 }
 
+export async function sendLlamaPrefillPocWarmup(options: LlamaPrefillPocWarmupOptions): Promise<void> {
+	if (options.model.provider !== "llama-cpp") {
+		return;
+	}
+
+	const logPath = join(options.agentDir, "llama-prefill-poc.log");
+	if (!isOpenAICompletionsModel(options.model)) {
+		writeLlamaPrefillPocLog(logPath, "warmup_payload_skipped", {
+			reason: options.reason,
+			provider: options.model.provider,
+			model: options.model.id,
+			api: options.model.api,
+			skipped: true,
+			skip_reason: "unsupported_api",
+			network_sent: false,
+		});
+		return;
+	}
+
+	if (!options.apiKey) {
+		writeLlamaPrefillPocLog(logPath, "warmup_payload_skipped", {
+			reason: options.reason,
+			provider: options.model.provider,
+			model: options.model.id,
+			api: options.model.api,
+			skipped: true,
+			skip_reason: "missing_api_key",
+			error: options.authError,
+			network_sent: false,
+		});
+		return;
+	}
+
+	const warmupId = randomUUID();
+	let key: string | undefined;
+	let promptKey: string | undefined;
+	let warmupKey: string | undefined;
+	let requestStarted = false;
+	let startedAt: number | undefined;
+
+	try {
+		const payload = buildOpenAICompletionsPayload(options.model, options.context, options.streamOptions);
+		const beforeCallbackAt = Date.now();
+		const nextPayload = await options.streamOptions?.onPayload?.(payload, options.model);
+		const finalPayload = nextPayload === undefined ? payload : nextPayload;
+		const warmupPayload = buildWarmupPayload(finalPayload);
+		const promptPayload = getPromptComparablePayload(finalPayload);
+		const now = Date.now();
+		key = hashPayload(options.model, finalPayload);
+		promptKey = hashPayload(options.model, promptPayload);
+		warmupKey = hashPayload(options.model, warmupPayload);
+
+		writeLlamaPrefillPocLog(logPath, "warmup_payload", {
+			warmup_id: warmupId,
+			reason: options.reason,
+			provider: options.model.provider,
+			model: options.model.id,
+			api: options.model.api,
+			key,
+			prompt_key: promptKey,
+			warmup_key: warmupKey,
+			payload_chars: stableStringifyLength(finalPayload),
+			payload_text_chars: countTextChars(finalPayload),
+			warmup_payload_chars: stableStringifyLength(warmupPayload),
+			warmup_payload_text_chars: countTextChars(warmupPayload),
+			prompt_chars: stableStringifyLength(promptPayload),
+			prompt_text_chars: countTextChars(promptPayload),
+			context_chars: stableStringifyLength(options.context),
+			context_text_chars: countTextChars(options.context),
+			messages: options.context.messages.length,
+			tools: options.context.tools?.length ?? 0,
+			max_tokens: getPayloadMaxTokens(finalPayload),
+			warmup_max_tokens: getPayloadMaxTokens(warmupPayload),
+			debounce_ms: options.debounceMs,
+			chunk_chars: options.chunkChars,
+			tool_name: options.toolName,
+			tool_call_id: options.toolCallId,
+			payload_callback_ms: now - beforeCallbackAt,
+			prefill_active: true,
+			network_sent: true,
+		});
+
+		if (options.signal.aborted) {
+			writeLlamaPrefillPocLog(logPath, "warmup_aborted", {
+				warmup_id: warmupId,
+				reason: options.reason,
+				key,
+				prompt_key: promptKey,
+				warmup_key: warmupKey,
+				cancel_reason: getAbortReason(options.signal),
+				network_sent: false,
+			});
+			return;
+		}
+
+		const endpoint = buildChatCompletionsUrl(options.model.baseUrl);
+		startedAt = Date.now();
+		requestStarted = true;
+		writeLlamaPrefillPocLog(logPath, "warmup_start", {
+			warmup_id: warmupId,
+			reason: options.reason,
+			key,
+			prompt_key: promptKey,
+			warmup_key: warmupKey,
+			endpoint,
+			network_sent: true,
+		});
+
+		const response = await fetch(endpoint, {
+			method: "POST",
+			headers: buildWarmupHeaders(options.model, options.apiKey, options.headers),
+			body: JSON.stringify(warmupPayload),
+			signal: options.signal,
+		});
+		const responseAt = Date.now();
+		const responseText = await response.text();
+		const endedAt = Date.now();
+		const event = response.ok ? "warmup_done" : "warmup_error";
+		writeLlamaPrefillPocLog(logPath, event, {
+			warmup_id: warmupId,
+			reason: options.reason,
+			key,
+			prompt_key: promptKey,
+			warmup_key: warmupKey,
+			status: response.status,
+			request_to_response_ms: responseAt - startedAt,
+			duration_ms: endedAt - startedAt,
+			response_chars: responseText.length,
+			error: response.ok ? undefined : responseText.slice(0, 240).replace(/\s+/g, " ").trim(),
+			network_sent: true,
+		});
+	} catch (error) {
+		if (options.signal.aborted || isAbortError(error)) {
+			writeLlamaPrefillPocLog(logPath, "warmup_aborted", {
+				warmup_id: warmupId,
+				reason: options.reason,
+				provider: options.model.provider,
+				model: options.model.id,
+				api: options.model.api,
+				key,
+				prompt_key: promptKey,
+				warmup_key: warmupKey,
+				cancel_reason: getAbortReason(options.signal),
+				network_sent: requestStarted,
+			});
+			return;
+		}
+		const now = Date.now();
+		const message = error instanceof Error ? error.message : String(error);
+		writeLlamaPrefillPocLog(logPath, requestStarted ? "warmup_error" : "warmup_payload_error", {
+			warmup_id: warmupId,
+			reason: options.reason,
+			provider: options.model.provider,
+			model: options.model.id,
+			api: options.model.api,
+			key,
+			prompt_key: promptKey,
+			warmup_key: warmupKey,
+			error: message,
+			duration_ms: startedAt === undefined ? undefined : now - startedAt,
+			prefill_active: false,
+			network_sent: requestStarted,
+		});
+	}
+}
+
 function writeLlamaPrefillPocLog(logPath: string, event: string, fields: LogFields): void {
 	try {
 		mkdirSync(dirname(logPath), { recursive: true });
@@ -381,6 +561,60 @@ function getPromptComparablePayload(payload: unknown): unknown {
 		tool_choice: record.tool_choice,
 		tools: record.tools,
 	};
+}
+
+function buildWarmupPayload(payload: unknown): unknown {
+	if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+		return payload;
+	}
+	const record = { ...(payload as Record<string, unknown>) };
+	record.stream = false;
+	record.cache_prompt = true;
+	if (hasOwn(record, "max_completion_tokens") && !hasOwn(record, "max_tokens")) {
+		record.max_completion_tokens = 1;
+	} else {
+		record.max_tokens = 1;
+	}
+	return record;
+}
+
+function hasOwn(record: Record<string, unknown>, key: string): boolean {
+	return Object.hasOwn(record, key);
+}
+
+function buildChatCompletionsUrl(baseUrl: string): string {
+	const trimmed = baseUrl.replace(/\/+$/, "");
+	return trimmed.endsWith("/chat/completions") ? trimmed : `${trimmed}/chat/completions`;
+}
+
+function buildWarmupHeaders(
+	model: Model<Api>,
+	apiKey: string,
+	headers: Record<string, string> | undefined,
+): Record<string, string> {
+	const requestHeaders: Record<string, string> = {
+		"content-type": "application/json",
+		...model.headers,
+		...headers,
+	};
+	if (!hasHeader(requestHeaders, "authorization")) {
+		requestHeaders.Authorization = `Bearer ${apiKey}`;
+	}
+	return requestHeaders;
+}
+
+function hasHeader(headers: Record<string, string>, name: string): boolean {
+	const normalizedName = name.toLowerCase();
+	return Object.keys(headers).some((key) => key.toLowerCase() === normalizedName);
+}
+
+function isAbortError(error: unknown): boolean {
+	return error instanceof Error && error.name === "AbortError";
+}
+
+function getAbortReason(signal: AbortSignal): string | undefined {
+	const reason = (signal as AbortSignal & { reason?: unknown }).reason;
+	return typeof reason === "string" ? reason : undefined;
 }
 
 function isOpenAICompletionsModel(model: Model<Api>): model is Model<"openai-completions"> {
