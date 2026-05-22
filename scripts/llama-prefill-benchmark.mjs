@@ -168,10 +168,11 @@ function printMatrix(options) {
 	}
 }
 
-function stableSystemPrompt() {
+function stableSystemPrompt(salt) {
 	const lines = [
 		"You are Pi benchmark assistant.",
 		"Follow exact reply instructions. Do not add explanation.",
+		`Benchmark case salt: ${salt}.`,
 		"Benchmark context starts below.",
 	];
 	for (let index = 0; index < 180; index += 1) {
@@ -180,6 +181,9 @@ function stableSystemPrompt() {
 			`Context ${String(index).padStart(3, "0")}: ${moduleName} owns deterministic fixture data, cache-prefix analysis, and terminal workflow notes for llama prefill benchmarking.`,
 		);
 	}
+	lines.push("Generated failure log fixture:");
+	lines.push(`[001337] ERROR ${TARGET_MODULE} invariant failed: stale prefix map`);
+	lines.push("Final instruction for failure-log tasks: identify the module path from the ERROR line.");
 	lines.push("Benchmark context ends.");
 	return lines.join("\n");
 }
@@ -249,14 +253,14 @@ function chunkTextByBytes(text, chunkBytes) {
 	return chunks;
 }
 
-function launchMessages(userText) {
+function launchMessages(userText, salt) {
 	return [
-		{ role: "system", content: stableSystemPrompt() },
+		{ role: "system", content: stableSystemPrompt(salt) },
 		{ role: "user", content: userText },
 	];
 }
 
-function toolMessages(logText, sizeConfig) {
+function toolMessages(logText, sizeConfig, salt) {
 	const args = {
 		case: "cache-index-failure",
 		size_bytes: sizeConfig.sizeBytes,
@@ -264,7 +268,7 @@ function toolMessages(logText, sizeConfig) {
 		delay_ms: sizeConfig.delayMs,
 	};
 	return [
-		{ role: "system", content: stableSystemPrompt() },
+		{ role: "system", content: stableSystemPrompt(salt) },
 		{
 			role: "user",
 			content: "Analyze this generated failure log and answer with the single failing module name. Reply exactly: BENCH_TARGET: <path>",
@@ -377,6 +381,7 @@ async function runCase({ runId, iteration, testCase, options }) {
 }
 
 async function runLaunchCase({ runId, iteration, testCase, options }) {
+	const salt = caseSalt({ runId, iteration, testCase });
 	if (testCase.variant === "launch_stable_prefix") {
 		await sendRequest({
 			runId,
@@ -385,7 +390,7 @@ async function runLaunchCase({ runId, iteration, testCase, options }) {
 			options,
 			kind: "warmup",
 			reason: "launch",
-			messages: launchMessages(" "),
+			messages: launchMessages(" ", salt),
 			expected: undefined,
 			includeTools: true,
 			maxTokens: 1,
@@ -399,7 +404,7 @@ async function runLaunchCase({ runId, iteration, testCase, options }) {
 		options,
 		kind: "final",
 		reason: undefined,
-		messages: launchMessages("Reply exactly: LAUNCH_OK"),
+		messages: launchMessages("Reply exactly: LAUNCH_OK", salt),
 		expected: "LAUNCH_OK",
 		includeTools: true,
 		maxTokens: 8,
@@ -408,6 +413,7 @@ async function runLaunchCase({ runId, iteration, testCase, options }) {
 }
 
 async function runToolCase({ runId, iteration, testCase, options }) {
+	const salt = caseSalt({ runId, iteration, testCase });
 	const sizeConfig = TOOL_SIZES[testCase.size];
 	const logText = generateFailureLog(sizeConfig.sizeBytes);
 	const chunks = chunkTextByBytes(logText, sizeConfig.chunkBytes);
@@ -422,7 +428,7 @@ async function runToolCase({ runId, iteration, testCase, options }) {
 				options,
 				kind: "warmup",
 				reason: "tool_result_stream",
-				messages: toolMessages(partial, sizeConfig),
+				messages: toolMessages(partial, sizeConfig, salt),
 				expected: undefined,
 				includeTools: true,
 				maxTokens: 1,
@@ -439,7 +445,7 @@ async function runToolCase({ runId, iteration, testCase, options }) {
 			options,
 			kind: "warmup",
 			reason: "tool_result",
-			messages: toolMessages(logText, sizeConfig),
+			messages: toolMessages(logText, sizeConfig, salt),
 			expected: undefined,
 			includeTools: true,
 			maxTokens: 1,
@@ -453,7 +459,7 @@ async function runToolCase({ runId, iteration, testCase, options }) {
 		options,
 		kind: "final",
 		reason: undefined,
-		messages: toolMessages(logText, sizeConfig),
+		messages: toolMessages(logText, sizeConfig, salt),
 		expected: EXPECTED_TARGET,
 		includeTools: true,
 		maxTokens: 16,
@@ -462,6 +468,7 @@ async function runToolCase({ runId, iteration, testCase, options }) {
 }
 
 async function runEditorCase({ runId, iteration, testCase, options }) {
+	const salt = caseSalt({ runId, iteration, testCase });
 	const prompt = editorPrompt(testCase.variant);
 	for (const warmupPrompt of prompt.warmups) {
 		await sendRequest({
@@ -471,7 +478,7 @@ async function runEditorCase({ runId, iteration, testCase, options }) {
 			options,
 			kind: "warmup",
 			reason: "editor_change",
-			messages: launchMessages(warmupPrompt),
+			messages: launchMessages(warmupPrompt, salt),
 			expected: undefined,
 			includeTools: true,
 			maxTokens: 1,
@@ -485,12 +492,16 @@ async function runEditorCase({ runId, iteration, testCase, options }) {
 		options,
 		kind: "final",
 		reason: undefined,
-		messages: launchMessages(prompt.finalPrompt),
+		messages: launchMessages(prompt.finalPrompt, salt),
 		expected: EXPECTED_TARGET,
 		includeTools: true,
 		maxTokens: 16,
 		stream: true,
 	});
+}
+
+function caseSalt({ runId, iteration, testCase }) {
+	return [runId, iteration, testCase.scenario, testCase.variant, testCase.size ?? "-"].join(":");
 }
 
 async function sendRequest({
@@ -516,12 +527,12 @@ async function sendRequest({
 		body: JSON.stringify(body),
 	});
 	const responseAt = performance.now();
-	let firstTextDeltaMs;
+	let responseToFirstTextDeltaMs;
 	let content = "";
 	let responseText = "";
 	if (stream) {
 		const streamResult = await readStreamingContent(response, responseAt);
-		firstTextDeltaMs = streamResult.firstTextDeltaMs;
+		responseToFirstTextDeltaMs = streamResult.firstTextDeltaMs;
 		content = streamResult.content;
 		responseText = streamResult.responseText;
 	} else {
@@ -546,7 +557,12 @@ async function sendRequest({
 		payload_text_chars: countTextChars(body),
 		duration_ms: Math.round(endedAt - startedAt),
 		request_to_first_byte_ms: Math.round(responseAt - startedAt),
-		request_to_first_text_delta_ms: firstTextDeltaMs === undefined ? undefined : Math.round(firstTextDeltaMs),
+		request_to_first_text_delta_ms:
+			responseToFirstTextDeltaMs === undefined
+				? undefined
+				: Math.round(responseAt - startedAt + responseToFirstTextDeltaMs),
+		response_to_first_text_delta_ms:
+			responseToFirstTextDeltaMs === undefined ? undefined : Math.round(responseToFirstTextDeltaMs),
 		expected,
 		expected_ok: expected === undefined ? undefined : content.trim() === expected,
 		content: content.slice(0, 240),
@@ -669,30 +685,41 @@ function summarize(path, options) {
 	const records = lines.map((line) => JSON.parse(line));
 	const groups = new Map();
 	for (const record of records) {
-		if (record.kind !== "final") {
-			continue;
-		}
 		const key = [record.scenario, record.variant, record.size ?? "-"].join("\t");
-		const list = groups.get(key) ?? [];
-		list.push(record);
-		groups.set(key, list);
+		const group = groups.get(key) ?? { final: [], warmup: [] };
+		if (record.kind === "final") {
+			group.final.push(record);
+		} else if (record.kind === "warmup") {
+			group.warmup.push(record);
+		}
+		groups.set(key, group);
 	}
 	const summary = [];
 	for (const [key, recordsForKey] of groups) {
 		const [scenario, variant, size] = key.split("\t");
-		const firstDeltas = recordsForKey
+		const firstDeltas = recordsForKey.final
 			.map((record) => record.request_to_first_text_delta_ms)
 			.filter((value) => Number.isFinite(value));
-		const durations = recordsForKey.map((record) => record.duration_ms).filter((value) => Number.isFinite(value));
+		const firstBytes = recordsForKey.final
+			.map((record) => record.request_to_first_byte_ms)
+			.filter((value) => Number.isFinite(value));
+		const durations = recordsForKey.final.map((record) => record.duration_ms).filter((value) => Number.isFinite(value));
+		const warmupDurations = recordsForKey.warmup
+			.map((record) => record.duration_ms)
+			.filter((value) => Number.isFinite(value));
 		summary.push({
 			scenario,
 			variant,
 			size: size === "-" ? undefined : size,
-			runs: recordsForKey.length,
+			runs: recordsForKey.final.length,
+			warmups: recordsForKey.warmup.length,
+			warmup_duration_total_ms: sum(warmupDurations),
+			warmup_duration_median_ms: quantile(warmupDurations, 0.5),
+			first_byte_median_ms: quantile(firstBytes, 0.5),
 			first_delta_median_ms: quantile(firstDeltas, 0.5),
 			first_delta_p90_ms: quantile(firstDeltas, 0.9),
 			duration_median_ms: quantile(durations, 0.5),
-			expected_ok: recordsForKey.filter((record) => record.expected_ok === true).length,
+			expected_ok: recordsForKey.final.filter((record) => record.expected_ok === true).length,
 		});
 	}
 	if (options.json) {
@@ -706,6 +733,10 @@ function summarize(path, options) {
 				entry.variant,
 				entry.size ?? "-",
 				`runs=${entry.runs}`,
+				`warmups=${entry.warmups}`,
+				`warmup_total=${formatMetric(entry.warmup_duration_total_ms)}`,
+				`warmup_med=${formatMetric(entry.warmup_duration_median_ms)}`,
+				`first_byte_med=${formatMetric(entry.first_byte_median_ms)}`,
 				`first_delta_med=${formatMetric(entry.first_delta_median_ms)}`,
 				`first_delta_p90=${formatMetric(entry.first_delta_p90_ms)}`,
 				`duration_med=${formatMetric(entry.duration_median_ms)}`,
@@ -713,6 +744,10 @@ function summarize(path, options) {
 			].join("\t"),
 		);
 	}
+}
+
+function sum(values) {
+	return values.reduce((total, value) => total + value, 0);
 }
 
 function quantile(values, q) {
