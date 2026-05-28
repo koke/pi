@@ -1,11 +1,12 @@
 import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 
 type LogFields = Record<string, string>;
 
 const STATUS_KEY = "llama-prefill";
-const DEFAULT_AGENT_DIR = "/private/tmp/pi-dev/agent";
+const DEFAULT_AGENT_DIR = join(homedir(), ".pi", "agent");
 const POLL_MS = 500;
 const MAX_TAIL_BYTES = 64 * 1024;
 const SOURCE_PID = String(process.pid);
@@ -110,6 +111,24 @@ function formatStatus(fields: LogFields, theme: Theme): string | undefined {
 	return undefined;
 }
 
+function isPrefillPocModel(ctx: ExtensionContext): boolean {
+	return isPrefillPocProvider(ctx.model?.provider) || isLocalOpenAICompatibleBaseUrl(ctx.model?.baseUrl);
+}
+
+function isPrefillPocProvider(provider: string | undefined): boolean {
+	return provider === "llama-cpp" || provider === "lm-studio" || provider === "lmstudio";
+}
+
+function isLocalOpenAICompatibleBaseUrl(baseUrl: string | undefined): boolean {
+	if (!baseUrl) return false;
+	try {
+		const url = new URL(baseUrl);
+		return (url.hostname === "127.0.0.1" || url.hostname === "localhost") && url.port === "1234";
+	} catch {
+		return false;
+	}
+}
+
 export default function llamaPrefillStatusExtension(pi: ExtensionAPI) {
 	if (process.env.PI_LLAMA_PREFILL_STATUS === "0") return;
 
@@ -126,12 +145,12 @@ export default function llamaPrefillStatusExtension(pi: ExtensionAPI) {
 	};
 
 	const update = (ctx: ExtensionContext) => {
-		if (!ctx.hasUI || ctx.model?.provider !== "llama-cpp") {
+		if (!ctx.hasUI || !isPrefillPocModel(ctx)) {
 			stop(ctx);
 			return;
 		}
 		const fields = latestWarmupEvent(logPath());
-		const status = fields ? formatStatus(fields, ctx.ui.theme) : undefined;
+		const status = fields ? formatStatus(fields, ctx.ui.theme) : ctx.ui.theme.fg("muted", "draft: idle");
 		if (status !== lastStatus) {
 			ctx.ui.setStatus(STATUS_KEY, status);
 			lastStatus = status;
@@ -139,7 +158,7 @@ export default function llamaPrefillStatusExtension(pi: ExtensionAPI) {
 	};
 
 	const start = (ctx: ExtensionContext) => {
-		if (!ctx.hasUI || ctx.model?.provider !== "llama-cpp") {
+		if (!ctx.hasUI || !isPrefillPocModel(ctx)) {
 			stop(ctx);
 			return;
 		}

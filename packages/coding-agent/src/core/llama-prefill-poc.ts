@@ -234,14 +234,14 @@ export class LlamaPrefillPocLogger {
 }
 
 export function createLlamaPrefillPocLogger(options: LlamaPrefillPocLoggerOptions): LlamaPrefillPocLogger | undefined {
-	if (options.model.provider !== "llama-cpp") {
+	if (!isPrefillPocModel(options.model)) {
 		return undefined;
 	}
 	return new LlamaPrefillPocLogger(options);
 }
 
 export function logLlamaPrefillPocDraftChange(options: LlamaPrefillPocDraftChangeOptions): void {
-	if (options.model.provider !== "llama-cpp") {
+	if (!isPrefillPocModel(options.model)) {
 		return;
 	}
 
@@ -277,7 +277,7 @@ export function logLlamaPrefillPocDraftChange(options: LlamaPrefillPocDraftChang
 }
 
 export async function logLlamaPrefillPocPayload(options: LlamaPrefillPocPayloadOptions): Promise<void> {
-	if (options.model.provider !== "llama-cpp") {
+	if (!isPrefillPocModel(options.model)) {
 		return;
 	}
 
@@ -343,7 +343,7 @@ export async function logLlamaPrefillPocPayload(options: LlamaPrefillPocPayloadO
 }
 
 export async function sendLlamaPrefillPocWarmup(options: LlamaPrefillPocWarmupOptions): Promise<void> {
-	if (options.model.provider !== "llama-cpp") {
+	if (!isPrefillPocModel(options.model)) {
 		return;
 	}
 
@@ -514,6 +514,23 @@ export async function sendLlamaPrefillPocWarmup(options: LlamaPrefillPocWarmupOp
 			prefill_active: false,
 			network_sent: requestStarted,
 		});
+	}
+}
+
+function isPrefillPocModel(model: Model<Api>): boolean {
+	return isPrefillPocProvider(model.provider) || isLocalOpenAICompatibleBaseUrl(model.baseUrl);
+}
+
+function isPrefillPocProvider(provider: string): boolean {
+	return provider === "llama-cpp" || provider === "lm-studio" || provider === "lmstudio";
+}
+
+function isLocalOpenAICompatibleBaseUrl(baseUrl: string): boolean {
+	try {
+		const url = new URL(baseUrl);
+		return (url.hostname === "127.0.0.1" || url.hostname === "localhost") && url.port === "1234";
+	} catch {
+		return false;
 	}
 }
 
